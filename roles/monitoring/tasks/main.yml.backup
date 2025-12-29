@@ -38,7 +38,7 @@
 
     - name: Add user to docker group
       user:
-        name: devops
+        name: "{{ ansible_user }}"
         groups: docker
         append: yes
 
@@ -68,7 +68,7 @@
   template:
         src: node_exporter.service.j2  # добавим шаблон ниже
         dest: /etc/systemd/system/node_exporter.service
-  notify: Restart node_exporter
+        notify: Restart node_exporter
 
 - name: Enable and start Node Exporter
   systemd:
@@ -97,22 +97,11 @@
         dest: /opt/monitoring/prometheus.yml
       notify: Restart monitoring stack
 
-    - name: Install pip3 (required for Python packages)
-      apt:
-        name: python3-pip
-        state: present
-      become: yes
-
-    - name: Install Docker Compose Plugin (CLI v2)
-      apt:
-        name: docker-compose-plugin
-        state: present
-        update_cache: yes
-
-    - name: Start docker-compose stack (v2)
-      community.docker.docker_compose_v2:  # ← обратите внимание на _v2 в конце!
+    - name: Start docker-compose
+      community.docker.docker_compose:
         project_src: /opt/monitoring
         state: present
+        restarted: yes
 
     - name: Install Nginx and Certbot
       apt:
@@ -141,43 +130,11 @@
         state: absent
       notify: Reload Nginx
 
-    - name: Stop Nginx temporarily for certificate issuance
-      service:
-        name: nginx
-        state: stopped
-      become: yes
-
-    - name: Obtain SSL certificates (standalone mode)
-      command: >
-        certbot certonly
-        --standalone
-        --preferred-challenges http
-        -d {{ domain_prom }}
-        -d {{ domain_grafana }}
-        --non-interactive
-        --agree-tos
-        -m {{ certbot_email }}
+    - name: Obtain/renew SSL certificates
+      command: certbot --nginx -d {{ domain_prom }} -d {{ domain_grafana }} --non-interactive --agree-tos -m {{ certbot_email }}
       args:
         creates: /etc/letsencrypt/live/{{ domain_prom }}/fullchain.pem
-      become: yes
-
-    - name: Start Nginx back
-      service:
-        name: nginx
-        state: started
-      become: yes
-
-    - name: Configure Nginx with obtained certificates
-      command: >
-        certbot --nginx
-        -d {{ domain_prom }}
-        -d {{ domain_grafana }}
-        --non-interactive
-        --agree-tos
-        -m {{ certbot_email }}
-        --redirect
       notify: Reload Nginx
-
 
   when: inventory_hostname in groups['monitoring']
   vars:

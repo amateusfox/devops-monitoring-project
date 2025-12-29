@@ -1,9 +1,9 @@
 ---
 - name: Restart monitoring stack
-  community.docker.docker_compose:
+  community.docker.docker_compose_v2:
     project_src: /opt/monitoring
     state: present
-    restarted: yes
+  when: inventory_hostname in groups['monitoring']
 
 - name: Reload Nginx
   service:
