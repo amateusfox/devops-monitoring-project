@@ -1,0 +1,34 @@
+server {
+    listen 80;
+    server_name {{ domain_prom }} {{ domain_grafana }};
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name {{ domain_prom }};
+
+    ssl_certificate /etc/letsencrypt/live/{{ domain_prom }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ domain_prom }}/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:9090;
+        proxy_set_header Host $host;
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    server_name {{ domain_grafana }};
+
+    ssl_certificate /etc/letsencrypt/live/{{ domain_prom }}/fullchain.pem; 
+    ssl_certificate_key /etc/letsencrypt/live/{{ domain_prom }}/privkey.pem;
+
+    location / {
+        proxy_pass http://localhost:3000;
+        proxy_set_header Host $host;
+    }
+}

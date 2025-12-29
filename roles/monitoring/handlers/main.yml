@@ -1,0 +1,16 @@
+---
+- name: Restart monitoring stack
+  community.docker.docker_compose:
+    project_src: /opt/monitoring
+    state: present
+    restarted: yes
+
+- name: Reload Nginx
+  service:
+    name: nginx
+    state: reloaded
+
+- name: Restart node_exporter
+  systemd:
+    name: node_exporter
+    state: restarted

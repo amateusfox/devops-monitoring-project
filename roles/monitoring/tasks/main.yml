@@ -1,0 +1,127 @@
+---
+- name: Install Docker (if not present)
+  block:
+    - name: Add Docker GPG key
+      apt:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        keyring: /usr/share/keyrings/docker-archive-keyring.gpg
+        state: present
+
+    - name: Add Docker repo
+      apt_repository:
+        repo: deb [arch={{ ansible_architecture }} signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu noble stable
+        state: present
+
+    - name: Install Docker packages
+      apt:
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-compose-plugin
+        update_cache: yes
+
+    - name: Add user to docker group
+      user:
+        name: "{{ ansible_user }}"
+        groups: docker
+        append: yes
+
+- name: Install Node Exporter on all hosts
+  block:
+    - name: Create node_exporter user
+      user:
+        name: node_exporter
+        system: yes
+        shell: /usr/sbin/nologin
+
+    - name: Download and install Node Exporter
+      unarchive:
+        src: https://github.com/prometheus/node_exporter/releases/download/{{ node_exporter_version }}/node_exporter-{{ node_exporter_version }}.linux-amd64.tar.gz
+        dest: /tmp
+        remote_src: yes
+
+    - name: Copy binary
+      copy:
+        src: /tmp/node_exporter-{{ node_exporter_version }}.linux-amd64/node_exporter
+        dest: /usr/local/bin/node_exporter
+        mode: '0755'
+        remote_src: yes
+
+    - name: Create systemd service
+      template:
+        src: node_exporter.service.j2  # добавим шаблон ниже
+        dest: /etc/systemd/system/node_exporter.service
+      notify: Restart node_exporter
+
+    - name: Enable and start Node Exporter
+      systemd:
+        name: node_exporter
+        enabled: yes
+        state: started
+        daemon_reload: yes
+
+- name: Deploy monitoring stack on monitoring-vm only
+  block:
+    - name: Create directory for stack
+      file:
+        path: /opt/monitoring
+        state: directory
+        mode: '0755'
+
+    - name: Template docker-compose.yml
+      template:
+        src: docker-compose.yml.j2
+        dest: /opt/monitoring/docker-compose.yml
+      notify: Restart monitoring stack
+
+    - name: Template prometheus.yml
+      template:
+        src: prometheus.yml.j2
+        dest: /opt/monitoring/prometheus.yml
+      notify: Restart monitoring stack
+
+    - name: Start docker-compose
+      community.docker.docker_compose:
+        project_src: /opt/monitoring
+        state: present
+        restarted: yes
+
+    - name: Install Nginx and Certbot
+      apt:
+        name:
+          - nginx
+          - certbot
+          - python3-certbot-nginx
+        state: present
+
+    - name: Template Nginx config
+      template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/monitoring
+      notify: Reload Nginx
+
+    - name: Enable Nginx site
+      file:
+        src: /etc/nginx/sites-available/monitoring
+        dest: /etc/nginx/sites-enabled/monitoring
+        state: link
+      notify: Reload Nginx
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+      notify: Reload Nginx
+
+    - name: Obtain/renew SSL certificates
+      command: certbot --nginx -d {{ domain_prom }} -d {{ domain_grafana }} --non-interactive --agree-tos -m {{ certbot_email }}
+      args:
+        creates: /etc/letsencrypt/live/{{ domain_prom }}/fullchain.pem
+      notify: Reload Nginx
+
+  when: inventory_hostname in groups['monitoring']
+  vars:
+    domain_prom: "{{ lookup('env', 'DOMAIN_PROM') or 'prom.amateusfox.online' }}"
+    domain_grafana: "{{ lookup('env', 'DOMAIN_GRAFANA') or 'grafana.amateusfox.online' }}"
+    certbot_email: "{{ lookup('env', 'CERTBOT_EMAIL') or 'admin@amateusfox.online' }}"
