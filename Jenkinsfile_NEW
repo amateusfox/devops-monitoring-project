@@ -2,13 +2,6 @@ pipeline {
     agent any
     
     environment {
-        // Загружаем переменные из файла .env через credentials
-        ENV_FILE = credentials('monitoring-env-file')
-        
-        // Или отдельные переменные (альтернативный способ)
-        GRAFANA_PASS = credentials('grafana-admin-pass')
-        CERTBOT_EMAIL = credentials('certbot-email')
-        
         // Домены
         DOMAIN_PROM = 'prom.amateusfox.online'
         DOMAIN_GRAFANA = 'grafana.amateusfox.online'
@@ -24,35 +17,6 @@ pipeline {
                 cleanWs()
                 checkout scm
                 sh 'ls -la'
-            }
-        }
-        
-        stage('Load Environment Variables') {
-            steps {
-                // Способ 1: Из файла .env (если загружен как secret file)
-                script {
-                    if (fileExists("${ENV_FILE}")) {
-                        def lines = readFile("${ENV_FILE}").split('\n')
-                        lines.each { line ->
-                            line = line.trim()
-                            if (line && !line.startsWith('#')) {
-                                def parts = line.split('=', 2)
-                                if (parts.size() == 2) {
-                                    env[parts[0].trim()] = parts[1].trim()
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Выводим переменные для отладки (без паролей)
-                sh '''
-                    echo "=== Environment Variables ==="
-                    echo "DOMAIN_PROM: ${DOMAIN_PROM}"
-                    echo "DOMAIN_GRAFANA: ${DOMAIN_GRAFANA}"
-                    echo "CONTROL_VM_IP: ${CONTROL_VM_IP}"
-                    echo "MONITORING_VM_IP: ${MONITORING_VM_IP}"
-                '''
             }
         }
         
@@ -98,28 +62,31 @@ EOF
         
         stage('Deploy with Ansible') {
             steps {
-                script {
-                    // Экспортируем переменные для Ansible
-                    env.ANSIBLE_HOST_KEY_CHECKING = "False"
-                    env.DOMAIN_PROM = DOMAIN_PROM
-                    env.DOMAIN_GRAFANA = DOMAIN_GRAFANA
-                    env.CERTBOT_EMAIL = CERTBOT_EMAIL
-                    env.CONTROL_VM_IP = CONTROL_VM_IP
-                    env.GRAFANA_ADMIN_PASSWORD = GRAFANA_PASS
+                withCredentials([
+                    string(credentialsId: 'grafana-admin-pass', variable: 'GRAFANA_PASS'),
+                    string(credentialsId: 'certbot-email', variable: 'CERTBOT_EMAIL')
+                ]) {
+                    sh '''
+                        echo "=== Running Ansible Playbook ==="
+                        echo "Setting environment variables for Ansible"
+                        
+                        export DOMAIN_PROM="${DOMAIN_PROM}"
+                        export DOMAIN_GRAFANA="${DOMAIN_GRAFANA}"
+                        export CERTBOT_EMAIL="${CERTBOT_EMAIL}"
+                        export CONTROL_VM_IP="${CONTROL_VM_IP}"
+                        export GRAFANA_ADMIN_PASSWORD="${GRAFANA_PASS}"
+                        export ANSIBLE_HOST_KEY_CHECKING=False
+                        
+                        ansible-playbook -i inventory.ini playbook.yml -v
+                        
+                        if [ $? -eq 0 ]; then
+                            echo "Ansible playbook completed successfully"
+                        else
+                            echo "Ansible playbook failed"
+                            exit 1
+                        fi
+                    '''
                 }
-                
-                sh '''
-                    echo "=== Running Ansible Playbook ==="
-                    ansible-playbook -i inventory.ini playbook.yml -vv
-                    
-                    # Проверяем результат выполнения
-                    if [ $? -eq 0 ]; then
-                        echo "Ansible playbook completed successfully"
-                    else
-                        echo "Ansible playbook failed"
-                        exit 1
-                    fi
-                '''
             }
         }
         
@@ -132,8 +99,12 @@ EOF
                 sh '''
                     echo "=== Checking Prometheus ==="
                     # Проверка health endpoint
-                    curl -f -L --retry 3 --max-time 30 https://${DOMAIN_PROM}/-/healthy
-                    echo "Prometheus health check: OK"
+                    if curl -f -L --retry 3 --max-time 30 https://${DOMAIN_PROM}/-/healthy; then
+                        echo "Prometheus health check: OK"
+                    else
+                        echo "ERROR: Prometheus health check failed"
+                        exit 1
+                    fi
                     
                     # Проверка доступа к UI
                     STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://${DOMAIN_PROM}/graph)
@@ -149,8 +120,12 @@ EOF
                 sh '''
                     echo "=== Checking Grafana ==="
                     # Проверка health endpoint
-                    curl -f -L --retry 3 --max-time 30 https://${DOMAIN_GRAFANA}/api/health
-                    echo "Grafana health check: OK"
+                    if curl -f -L --retry 3 --max-time 30 https://${DOMAIN_GRAFANA}/api/health; then
+                        echo "Grafana health check: OK"
+                    else
+                        echo "ERROR: Grafana health check failed"
+                        exit 1
+                    fi
                     
                     # Проверка доступа к UI
                     STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://${DOMAIN_GRAFANA}/login)
@@ -168,70 +143,88 @@ EOF
                     # Проверка срока действия
                     for DOMAIN in ${DOMAIN_PROM} ${DOMAIN_GRAFANA}; do
                         echo "Checking certificate for $DOMAIN"
-                        EXPIRY=$(openssl s_client -connect "$DOMAIN":443 -servername "$DOMAIN" < /dev/null 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)
-                        echo "Certificate expires on: $EXPIRY"
                         
-                        # Проверяем, что срок действия больше 7 дней
-                        openssl s_client -connect "$DOMAIN":443 -servername "$DOMAIN" < /dev/null 2>/dev/null | openssl x509 -noout -checkend 604800
-                        if [ $? -eq 0 ]; then
-                            echo "Certificate is valid for at least 7 more days"
+                        # Проверяем, что сертификат существует
+                        if openssl s_client -connect "$DOMAIN":443 -servername "$DOMAIN" < /dev/null 2>/dev/null | openssl x509 -noout -subject 2>/dev/null; then
+                            echo "Certificate found for $DOMAIN"
+                            
+                            # Проверяем срок действия
+                            openssl s_client -connect "$DOMAIN":443 -servername "$DOMAIN" < /dev/null 2>/dev/null | openssl x509 -noout -checkend 604800
+                            if [ $? -eq 0 ]; then
+                                echo "Certificate is valid for at least 7 more days"
+                            else
+                                echo "WARNING: Certificate expires soon or is invalid"
+                            fi
                         else
-                            echo "WARNING: Certificate expires soon or is invalid"
+                            echo "ERROR: No certificate found for $DOMAIN"
+                            exit 1
                         fi
                     done
                 '''
                 
-                // 4. Проверка метрик Node Exporter - УПРОЩЕННАЯ ВЕРСИЯ
+                // 4. Проверка метрик Node Exporter
                 sh '''
                     echo "=== Checking Node Exporter Metrics ==="
-                    # Проверяем метрики с control-vm (упрощенный вариант)
-                    echo "Testing metrics endpoint..."
                     
-                    # Способ 1: Проверяем доступность endpoint
-                    if curl -s -f -L --max-time 30 "https://${DOMAIN_PROM}/api/v1/query?query=up{job=\\"node_exporter_control\\"}" > /tmp/metrics.json; then
-                        echo "Metrics endpoint is accessible"
-                        
-                        # Проверяем, что есть какие-то данные
-                        if grep -q "result" /tmp/metrics.json; then
-                            echo "Metrics data found in response"
-                            
-                            # Проверяем, что результат не пустой
-                            if grep -q '"result":\[\]' /tmp/metrics.json; then
-                                echo "WARNING: Empty result array - no metrics found"
-                            else
-                                echo "SUCCESS: Node Exporter metrics are available"
-                            fi
-                        else
-                            echo "ERROR: Invalid response format"
-                            cat /tmp/metrics.json
-                            exit 1
-                        fi
-                    else
-                        echo "ERROR: Failed to query metrics"
+                    # Сохраняем метрики в файл
+                    curl -s -f -L --max-time 30 "https://${DOMAIN_PROM}/api/v1/query?query=up{job=\\"node_exporter_control\\"}" > /tmp/metrics_check.json
+                    
+                    if [ $? -ne 0 ]; then
+                        echo "ERROR: Failed to query metrics from Prometheus"
                         exit 1
                     fi
                     
-                    # Проверяем raw metrics
-                    echo "Checking raw metrics..."
-                    curl -s https://${DOMAIN_PROM}/metrics | grep -E "node_cpu|node_memory|node_filesystem" | head -3
+                    echo "Checking if metrics are present..."
+                    
+                    # Простая проверка - есть ли данные в ответе
+                    if grep -q "node_exporter_control" /tmp/metrics_check.json; then
+                        echo "SUCCESS: Found Node Exporter metrics"
+                        
+                        # Проверяем, что результат не пустой (без квадратных скобок)
+                        if grep -q '"result":\\[\\]' /tmp/metrics_check.json; then
+                            echo "WARNING: Empty result array in response"
+                        else
+                            echo "SUCCESS: Metrics data is present"
+                        fi
+                    else
+                        echo "ERROR: No Node Exporter metrics found"
+                        cat /tmp/metrics_check.json
+                        exit 1
+                    fi
+                    
+                    # Проверяем raw metrics endpoint
+                    echo "Checking raw metrics endpoint..."
+                    RAW_METRICS=$(curl -s https://${DOMAIN_PROM}/metrics | head -20)
+                    echo "First 20 lines of raw metrics:"
+                    echo "$RAW_METRICS"
+                    
+                    # Проверяем наличие ключевых метрик
+                    if echo "$RAW_METRICS" | grep -q "node_"; then
+                        echo "SUCCESS: Found node_ metrics in raw endpoint"
+                    else
+                        echo "WARNING: No node_ metrics in raw endpoint"
+                    fi
                 '''
                 
                 // 5. Проверка работы Docker контейнеров
                 sh '''
                     echo "=== Checking Docker Containers ==="
-                    ssh -i ~/.ssh/id_ansible_ed25519 -o StrictHostKeyChecking=no devops@${MONITORING_VM_IP} "
-                        echo 'Containers status:'
-                        docker ps --format 'table {{.Names}} {{.Status}} {{.Ports}}'
+                    
+                    ssh -i ~/.ssh/id_ansible_ed25519 -o StrictHostKeyChecking=no devops@${MONITORING_VM_IP} '
+                        echo "Containers status:"
+                        docker ps --format "table {{.Names}} {{.Status}} {{.Ports}}"
                         
                         # Проверяем, что все контейнеры работают
-                        RUNNING=\$(docker ps -q | wc -l)
-                        echo "Running containers: \$RUNNING"
+                        RUNNING=$(docker ps -q | wc -l)
+                        echo "Running containers: $RUNNING"
                         
-                        if [ \$RUNNING -lt 3 ]; then
-                            echo 'ERROR: Not all containers are running'
+                        if [ $RUNNING -lt 3 ]; then
+                            echo "ERROR: Not all containers are running"
                             exit 1
+                        else
+                            echo "SUCCESS: All containers are running"
                         fi
-                    "
+                    '
                 '''
             }
         }
@@ -240,16 +233,25 @@ EOF
             steps {
                 sh '''
                     echo "=== Running Smoke Tests ==="
+                    
                     # Проверяем, что Prometheus собирает метрики
-                    QUERY="count(up)"
-                    RESULT=$(curl -s "https://${DOMAIN_PROM}/api/v1/query?query=$QUERY")
-                    echo "Query result sample:"
-                    echo "$RESULT" | head -20
+                    echo "Testing Prometheus query..."
+                    QUERY_RESPONSE=$(curl -s "https://${DOMAIN_PROM}/api/v1/query?query=count(up)")
+                    
+                    if echo "$QUERY_RESPONSE" | grep -q "success"; then
+                        echo "SUCCESS: Prometheus API is responding"
+                    else
+                        echo "WARNING: Prometheus API response format unexpected"
+                    fi
                     
                     # Проверяем, что Nginx проксирует правильно
                     echo "Testing Nginx proxy..."
-                    curl -I https://${DOMAIN_PROM} 2>/dev/null | grep -E "HTTP|Location|Server" | head -3
-                    curl -I https://${DOMAIN_GRAFANA} 2>/dev/null | grep -E "HTTP|Location|Server" | head -3
+                    
+                    echo "Prometheus endpoint:"
+                    curl -I https://${DOMAIN_PROM} 2>/dev/null | head -1
+                    
+                    echo "Grafana endpoint:"
+                    curl -I https://${DOMAIN_GRAFANA} 2>/dev/null | head -1
                 '''
             }
         }
@@ -259,21 +261,22 @@ EOF
         success {
             echo '🚀 Deployment successful! All checks passed.'
             sh '''
-                echo "=== Summary ==="
+                echo "=== Deployment Summary ==="
                 echo "Prometheus: https://${DOMAIN_PROM}"
                 echo "Grafana: https://${DOMAIN_GRAFANA}"
-                echo "Grafana admin password is stored in Jenkins credentials"
+                echo "Alertmanager: https://alertmanager.amateusfox.online"
+                echo ""
+                echo "All services are up and running with valid SSL certificates"
             '''
         }
         failure {
             echo '❌ Deployment failed! Check the logs above.'
-            // Можно добавить уведомления
         }
         always {
             // Очистка
             sh '''
                 rm -f ~/.ssh/id_ansible_ed25519
-                rm -f /tmp/metrics.json 2>/dev/null || true
+                rm -f /tmp/metrics_check.json 2>/dev/null || true
                 echo "Cleanup completed"
             '''
         }
