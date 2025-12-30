@@ -49,10 +49,13 @@ EOF
                 '''
                 
                 sh '''
-                    if ! command -v ansible &> /dev/null; then
-                        echo "Installing Ansible..."
-                        sudo apt-get update
-                        sudo apt-get install -y ansible
+                    # Проверяем есть ли Ansible
+                    if command -v ansible &> /dev/null; then
+                        echo "Ansible is installed"
+                        ansible --version
+                    else
+                        echo "WARNING: Ansible not found"
+                        echo "Assuming Ansible will be available via PATH"
                     fi
                 '''
             }
@@ -65,10 +68,11 @@ EOF
                     string(credentialsId: 'certbot-email', variable: 'CERTBOT_EMAIL')
                 ]) {
                     sh '''
-                        echo "Starting deployment..."
+                        echo "=== Starting Ansible Deployment ==="
                         echo "Prometheus: ${DOMAIN_PROM}"
                         echo "Grafana: ${DOMAIN_GRAFANA}"
                         
+                        # Экспортируем переменные для Ansible
                         export DOMAIN_PROM="${DOMAIN_PROM}"
                         export DOMAIN_GRAFANA="${DOMAIN_GRAFANA}"
                         export CERTBOT_EMAIL="${CERTBOT_EMAIL}"
@@ -76,12 +80,13 @@ EOF
                         export GRAFANA_ADMIN_PASSWORD="${GRAFANA_PASS}"
                         export ANSIBLE_HOST_KEY_CHECKING=False
                         
+                        echo "Running ansible-playbook..."
                         ansible-playbook -i inventory.ini playbook.yml -v
                         
                         if [ $? -eq 0 ]; then
-                            echo "Deployment successful"
+                            echo "✅ Ansible deployment successful"
                         else
-                            echo "Deployment failed"
+                            echo "❌ Ansible deployment failed"
                             exit 1
                         fi
                     '''
@@ -97,9 +102,9 @@ EOF
                 sh '''
                     echo "=== Checking Prometheus ==="
                     if curl -f -L --max-time 30 https://${DOMAIN_PROM}/-/healthy; then
-                        echo "Prometheus: HEALTHY"
+                        echo "✅ Prometheus: HEALTHY"
                     else
-                        echo "Prometheus: UNHEALTHY"
+                        echo "❌ Prometheus: UNHEALTHY"
                         exit 1
                     fi
                 '''
@@ -108,26 +113,26 @@ EOF
                 sh '''
                     echo "=== Checking Grafana ==="
                     if curl -f -L --max-time 30 https://${DOMAIN_GRAFANA}/api/health; then
-                        echo "Grafana: HEALTHY"
+                        echo "✅ Grafana: HEALTHY"
                     else
-                        echo "Grafana: UNHEALTHY"
+                        echo "❌ Grafana: UNHEALTHY"
                         exit 1
                     fi
                 '''
                 
                 // 3. Check SSL
                 sh '''
-                    echo "=== Checking SSL ==="
+                    echo "=== Checking SSL Certificates ==="
                     echo "Testing certificate for ${DOMAIN_PROM}"
                     if openssl s_client -connect ${DOMAIN_PROM}:443 -servername ${DOMAIN_PROM} < /dev/null 2>/dev/null | openssl x509 -noout -checkend 0; then
-                        echo "SSL certificate: VALID"
+                        echo "✅ SSL certificate: VALID"
                     else
-                        echo "SSL certificate: INVALID"
+                        echo "❌ SSL certificate: INVALID"
                         exit 1
                     fi
                 '''
                 
-                // 4. Check Node Exporter metrics (SIMPLIFIED - без квадратных скобок)
+                // 4. Check Node Exporter metrics
                 sh '''
                     echo "=== Checking Metrics ==="
                     echo "Querying Prometheus for metrics..."
@@ -135,11 +140,11 @@ EOF
                     # Простой запрос к Prometheus API
                     RESPONSE=$(curl -s https://${DOMAIN_PROM}/api/v1/query?query=up)
                     
-                    # Проверяем что ответ содержит данные (без сложных регулярных выражений)
+                    # Проверяем что ответ содержит данные
                     if echo "$RESPONSE" | grep -q "node_exporter_control"; then
-                        echo "Node Exporter metrics: FOUND"
+                        echo "✅ Node Exporter metrics: FOUND"
                     else
-                        echo "Node Exporter metrics: NOT FOUND"
+                        echo "❌ Node Exporter metrics: NOT FOUND"
                         echo "Response sample:"
                         echo "$RESPONSE" | head -5
                         exit 1
@@ -161,9 +166,9 @@ EOF
                         echo "Running containers: $COUNT"
                         
                         if [ $COUNT -ge 2 ]; then
-                            echo "Docker: OK"
+                            echo "✅ Docker: OK"
                         else
-                            echo "Docker: ERROR - not enough containers"
+                            echo "❌ Docker: ERROR - not enough containers"
                             exit 1
                         fi
                     '
@@ -186,7 +191,7 @@ EOF
                     curl -s -o /dev/null -w "Grafana: %{http_code}\n" https://${DOMAIN_GRAFANA}/login
                     
                     echo ""
-                    echo "Deployment completed successfully!"
+                    echo "✅ Deployment completed successfully!"
                 '''
             }
         }
