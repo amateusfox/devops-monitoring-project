@@ -145,11 +145,15 @@
         name: docker-compose-plugin
         state: present
         update_cache: yes
+        remove_orphans: yes
+        recreate: always
 
     - name: Start docker-compose stack (v2)
-      community.docker.docker_compose_v2:  # ← обратите внимание на _v2 в конце!
+      community.docker.docker_compose_v2:
         project_src: /opt/monitoring
         state: present
+        remove_orphans: yes
+        recreate: always
 
     - name: Install Nginx and Certbot
       apt:
