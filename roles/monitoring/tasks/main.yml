@@ -236,14 +236,16 @@
     - name: Configure Nginx with obtained certificates
       command: >
         certbot --nginx
-        -d {{ domain_prom }}
-        -d {{ domain_grafana }}
+        -d {{ DOMAIN_PROM }}
+        -d {{ DOMAIN_GRAFANA }}
         --non-interactive
         --agree-tos
-        -m {{ certbot_email }}
+        -m {{ CERTBOT_EMAIL }}
         --redirect
+      args:
+        creates: "/etc/letsencrypt/live/{{ DOMAIN_PROM }}/fullchain.pem"
+      when: inventory_hostname in groups['monitoring']
       notify: Reload Nginx
-
 
   when: inventory_hostname in groups['monitoring']
   vars:
