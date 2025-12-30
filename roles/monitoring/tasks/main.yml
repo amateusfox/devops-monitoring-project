@@ -85,6 +85,43 @@
         state: directory
         mode: '0755'
 
+    - name: Create directory for Prometheus rules
+      file:
+        path: /opt/monitoring/prometheus/rules
+        state: directory
+        mode: '0755'
+      when: inventory_hostname in groups['monitoring']
+    - name: Create directory for Alertmanager config
+      file:
+        path: /opt/monitoring/alertmanager
+        state: directory
+        mode: '0755'
+      when: inventory_hostname in groups['monitoring']
+
+    - name: Copy alerting rules
+      copy:
+        src: "{{ item }}"
+        dest: /opt/monitoring/prometheus/rules/
+      loop:
+        - "{{ playbook_dir }}/roles/monitoring/files/rules/node_alerts.yml"
+      when: inventory_hostname in groups['monitoring']
+      notify: Restart monitoring stack
+
+    - name: Create directory for Alertmanager config
+      file:
+        path: /opt/monitoring/alertmanager
+        state: directory
+        mode: '0755'
+      when: inventory_hostname in groups['monitoring']
+
+    - name: Copy Alertmanager configuration
+      copy:
+        src: "{{ playbook_dir }}/roles/monitoring/files/alertmanager/"
+        dest: /opt/monitoring/alertmanager/
+        directory_mode: yes
+      when: inventory_hostname in groups['monitoring']
+      notify: Restart monitoring stack
+
     - name: Template docker-compose.yml
       template:
         src: docker-compose.yml.j2

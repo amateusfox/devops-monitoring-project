@@ -1,0 +1,38 @@
+groups:
+  - name: node_alerts
+    rules:
+      - alert: InstanceDown
+        expr: up{job="node_exporter_control"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          description: "Таргет {{ $labels.job }} ({{ $labels.instance }}) недоступен более 1 минуты."
+          summary: "Инстанс недоступен"
+
+      - alert: HighCpuUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          description: "Загрузка CPU на {{ $labels.instance }} составляет {{ $value | humanize }}%."
+          summary: "Высокая загрузка процессора"
+
+      - alert: LowMemory
+        expr: (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          description: "Свободной памяти на {{ $labels.instance }} осталось {{ $value | humanize }}%."
+          summary: "Мало свободной памяти"
+
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) * 100 < 10
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          description: "Свободного места на корневом разделе {{ $labels.instance }} осталось {{ $value | humanize }}%."
+          summary: "Мало свободного места на диске"
