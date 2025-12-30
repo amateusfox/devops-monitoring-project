@@ -146,6 +146,15 @@
         state: present
         update_cache: yes
 
+    - name: Force remove conflicting containers (safety)
+      command: >
+        docker rm -f prometheus alertmanager
+      args:
+        warn: no
+      ignore_errors: yes
+      register: cleanup_result
+      changed_when: "'No such container' not in cleanup_result.stderr"
+
     - name: Start docker-compose stack (v2)
       community.docker.docker_compose_v2:
         project_src: /opt/monitoring
