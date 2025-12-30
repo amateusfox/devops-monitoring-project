@@ -141,7 +141,7 @@ EOF
                     RESPONSE=$(curl -s https://${DOMAIN_PROM}/api/v1/query?query=up)
                     
                     # Проверяем что ответ содержит данные
-                    if echo "$RESPONSE" | grep -q "node_exporter_control"; then
+                    if echo "$RESPONSE" | grep -q '"job":"node"'; then
                         echo "✅ Node Exporter metrics: FOUND"
                     else
                         echo "❌ Node Exporter metrics: NOT FOUND"
