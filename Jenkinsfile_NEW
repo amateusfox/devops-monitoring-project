@@ -1,0 +1,262 @@
+pipeline {
+    agent any
+    
+    environment {
+        // Загружаем переменные из файла .env через credentials
+        ENV_FILE = credentials('monitoring-env-file')
+        
+        // Или отдельные переменные (альтернативный способ)
+        GRAFANA_PASS = credentials('grafana-admin-pass')
+        CERTBOT_EMAIL = credentials('certbot-email')
+        
+        // Домены
+        DOMAIN_PROM = 'prom.amateusfox.online'
+        DOMAIN_GRAFANA = 'grafana.amateusfox.online'
+        
+        // IP-адреса
+        CONTROL_VM_IP = '95.163.226.71'
+        MONITORING_VM_IP = '194.67.124.52'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                cleanWs()
+                checkout scm
+                sh 'ls -la'
+            }
+        }
+        
+        stage('Load Environment Variables') {
+            steps {
+                // Способ 1: Из файла .env (если загружен как secret file)
+                script {
+                    if (fileExists("${ENV_FILE}")) {
+                        readFile("${ENV_FILE}").split('\n').each { line ->
+                            if (line.trim() && !line.startsWith('#')) {
+                                def (key, value) = line.split('=', 2)
+                                if (key && value) {
+                                    env[key.trim()] = value.trim()
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Выводим переменные для отладки (без паролей)
+                sh '''
+                    echo "=== Environment Variables ==="
+                    echo "DOMAIN_PROM: ${DOMAIN_PROM}"
+                    echo "DOMAIN_GRAFANA: ${DOMAIN_GRAFANA}"
+                    echo "CONTROL_VM_IP: ${CONTROL_VM_IP}"
+                    echo "MONITORING_VM_IP: ${MONITORING_VM_IP}"
+                '''
+            }
+        }
+        
+        stage('Prepare Ansible Environment') {
+            steps {
+                // Копируем SSH ключ из Jenkins credentials
+                withCredentials([file(credentialsId: 'ansible-ssh-key', variable: 'SSH_KEY')]) {
+                    sh '''
+                        mkdir -p ~/.ssh
+                        cp "${SSH_KEY}" ~/.ssh/id_ansible_ed25519
+                        chmod 600 ~/.ssh/id_ansible_ed25519
+                    '''
+                }
+                
+                // Обновляем inventory.ini с актуальными IP
+                sh '''
+                    cat > inventory.ini << EOF
+[monitoring]
+monitoring-vm ansible_host=${MONITORING_VM_IP} ansible_user=devops ansible_ssh_private_key_file=~/.ssh/id_ansible_ed25519 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[control]
+control-vm ansible_host=${CONTROL_VM_IP} ansible_user=devops ansible_ssh_private_key_file=~/.ssh/id_ansible_ed25519 ansible_ssh_common_args='-o StrictHostKeyChecking=no'
+
+[all:children]
+monitoring
+control
+EOF
+                    
+                    echo "=== Generated inventory.ini ==="
+                    cat inventory.ini
+                '''
+                
+                // Устанавливаем Ansible если нет
+                sh '''
+                    if ! command -v ansible &> /dev/null; then
+                        sudo apt-get update
+                        sudo apt-get install -y ansible python3-pip
+                        pip3 install docker
+                    fi
+                '''
+            }
+        }
+        
+        stage('Deploy with Ansible') {
+            steps {
+                script {
+                    // Экспортируем переменные для Ansible
+                    env.ANSIBLE_HOST_KEY_CHECKING = "False"
+                    env.DOMAIN_PROM = DOMAIN_PROM
+                    env.DOMAIN_GRAFANA = DOMAIN_GRAFANA
+                    env.CERTBOT_EMAIL = CERTBOT_EMAIL
+                    env.CONTROL_VM_IP = CONTROL_VM_IP
+                    env.GRAFANA_ADMIN_PASSWORD = GRAFANA_PASS
+                }
+                
+                sh '''
+                    echo "=== Running Ansible Playbook ==="
+                    ansible-playbook -i inventory.ini playbook.yml -vv
+                    
+                    # Проверяем результат выполнения
+                    if [ $? -eq 0 ]; then
+                        echo "Ansible playbook completed successfully"
+                    else
+                        echo "Ansible playbook failed"
+                        exit 1
+                    fi
+                '''
+            }
+        }
+        
+        stage('Health Checks') {
+            steps {
+                // Даем время на запуск сервисов
+                sleep 30
+                
+                // 1. Проверка Prometheus
+                sh """
+                    echo "=== Checking Prometheus ==="
+                    # Проверка health endpoint
+                    curl -f -L --retry 3 --max-time 30 https://${DOMAIN_PROM}/-/healthy
+                    echo "Prometheus health check: OK"
+                    
+                    # Проверка доступа к UI
+                    STATUS=\$(curl -s -o /dev/null -w "%{http_code}" https://${DOMAIN_PROM}/graph)
+                    if [ "\$STATUS" -eq 200 ]; then
+                        echo "Prometheus UI is accessible (HTTP 200)"
+                    else
+                        echo "ERROR: Prometheus UI returned HTTP \$STATUS"
+                        exit 1
+                    fi
+                """
+                
+                // 2. Проверка Grafana
+                sh """
+                    echo "=== Checking Grafana ==="
+                    # Проверка health endpoint
+                    curl -f -L --retry 3 --max-time 30 https://${DOMAIN_GRAFANA}/api/health
+                    echo "Grafana health check: OK"
+                    
+                    # Проверка доступа к UI
+                    STATUS=\$(curl -s -o /dev/null -w "%{http_code}" https://${DOMAIN_GRAFANA}/login)
+                    if [ "\$STATUS" -eq 200 ]; then
+                        echo "Grafana UI is accessible (HTTP 200)"
+                    else
+                        echo "ERROR: Grafana UI returned HTTP \$STATUS"
+                        exit 1
+                    fi
+                """
+                
+                // 3. Проверка SSL сертификатов
+                sh """
+                    echo "=== Checking SSL Certificates ==="
+                    # Проверка срока действия
+                    for DOMAIN in ${DOMAIN_PROM} ${DOMAIN_GRAFANA}; do
+                        echo "Checking certificate for \$DOMAIN"
+                        EXPIRY=\$(openssl s_client -connect "\$DOMAIN":443 -servername "\$DOMAIN" < /dev/null 2>/dev/null | openssl x509 -noout -enddate | cut -d= -f2)
+                        echo "Certificate expires on: \$EXPIRY"
+                        
+                        # Проверяем, что срок действия больше 7 дней
+                        openssl s_client -connect "\$DOMAIN":443 -servername "\$DOMAIN" < /dev/null 2>/dev/null | openssl x509 -noout -checkend 604800
+                        if [ \$? -eq 0 ]; then
+                            echo "Certificate is valid for at least 7 more days"
+                        else
+                            echo "WARNING: Certificate expires soon or is invalid"
+                        fi
+                    done
+                """
+                
+                // 4. Проверка метрик Node Exporter
+                sh """
+                    echo "=== Checking Node Exporter Metrics ==="
+                    # Проверяем метрики с control-vm
+                    METRICS=\$(curl -s -f -L --max-time 30 https://${DOMAIN_PROM}/api/v1/query?query=up{job="node_exporter_control"})
+                    echo "Metrics response: \$METRICS"
+                    
+                    if echo "\$METRICS" | grep -q '"result":\[\]'; then
+                        echo "ERROR: No metrics found for node_exporter_control"
+                        exit 1
+                    else
+                        echo "Node Exporter metrics are available"
+                    fi
+                    
+                    # Проверяем конкретные метрики
+                    curl -s https://${DOMAIN_PROM}/metrics | grep -E 'node_cpu|node_memory|node_filesystem' | head -5
+                    echo "Key metrics found"
+                """
+                
+                // 5. Проверка работы Docker контейнеров
+                sh """
+                    echo "=== Checking Docker Containers ==="
+                    ssh -i ~/.ssh/id_ansible_ed25519 -o StrictHostKeyChecking=no devops@${MONITORING_VM_IP} "
+                        echo 'Containers status:'
+                        docker ps --format 'table {{.Names}}\\t{{.Status}}\\t{{.Ports}}'
+                        
+                        # Проверяем, что все контейнеры работают
+                        RUNNING=\$(docker ps -q | wc -l)
+                        TOTAL=\$(docker ps -a | wc -l)
+                        echo 'Running: \$RUNNING, Total: \$((TOTAL-1))'
+                        
+                        if [ \$RUNNING -lt 3 ]; then
+                            echo 'ERROR: Not all containers are running'
+                            exit 1
+                        fi
+                    "
+                """
+            }
+        }
+        
+        stage('Smoke Tests') {
+            steps {
+                sh """
+                    echo "=== Running Smoke Tests ==="
+                    # Проверяем, что Prometheus собирает метрики
+                    QUERY='count(up)'
+                    RESULT=\$(curl -s "https://${DOMAIN_PROM}/api/v1/query?query=\$QUERY")
+                    echo "Query result: \$RESULT"
+                    
+                    # Проверяем, что Nginx проксирует правильно
+                    echo "Testing Nginx proxy..."
+                    curl -I https://${DOMAIN_PROM} 2>/dev/null | head -1
+                    curl -I https://${DOMAIN_GRAFANA} 2>/dev/null | head -1
+                """
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo '🚀 Deployment successful! All checks passed.'
+            sh """
+                echo '=== Summary ==='
+                echo 'Prometheus: https://${DOMAIN_PROM}'
+                echo 'Grafana: https://${DOMAIN_GRAFANA}'
+                echo 'Default Grafana credentials: admin / ${GRAFANA_PASS}'
+            """
+        }
+        failure {
+            echo '❌ Deployment failed! Check the logs above.'
+            // Можно добавить уведомления
+        }
+        always {
+            // Очистка
+            sh '''
+                rm -f ~/.ssh/id_ansible_ed25519
+                echo "Cleanup completed"
+            '''
+        }
+    }
+}
