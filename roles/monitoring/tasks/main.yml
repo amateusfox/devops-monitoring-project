@@ -155,6 +155,19 @@
       register: cleanup_result
       changed_when: "'No such container' not in cleanup_result.stderr"
 
+# Добавьте перед задачей "Start docker-compose stack (v2)"
+    - name: Clean up any existing docker resources
+      command: |
+        docker rm -f alertmanager prometheus grafana nginx || true
+        docker container prune -f || true
+        docker network prune -f || true
+        docker volume prune -f || true
+      args:
+        creates: /tmp/placeholder
+      ignore_errors: true
+      changed_when: false
+      when: inventory_hostname in groups['monitoring']
+
     - name: Start docker-compose stack (v2)
       community.docker.docker_compose_v2:
         project_src: /opt/monitoring
