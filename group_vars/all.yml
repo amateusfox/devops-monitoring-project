@@ -1,0 +1,11 @@
+---
+node_exporter_version: "1.8.2"
+prometheus_version: "latest"
+grafana_version: "latest"
+alertmanager_version: "latest"
+DOMAIN_PROM: "prom.amateusfox.online"
+DOMAIN_GRAFANA: "grafana.amateusfox.online"
+MONITORING_VM_IP: "194.67.124.52"
+CONTROL_VM_IP: "95.163.226.71"
+GRAFANA_ADMIN_PASSWORD: "admin123"
+CERTBOT_EMAIL: "admin@amateusfox.online"

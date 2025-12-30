@@ -147,13 +147,16 @@
         update_cache: yes
 
     - name: Force remove conflicting containers (safety)
-      command: >
-        docker rm -f prometheus alertmanager
+      shell: |
+        docker rm -f alertmanager prometheus grafana nginx 2>/dev/null || true
+        docker container prune -f 2>/dev/null || true
+        docker network prune -f 2>/dev/null || true
       args:
-        warn: no
-      ignore_errors: yes
+        executable: /bin/bash
       register: cleanup_result
-      changed_when: "'No such container' not in cleanup_result.stderr"
+      failed_when: false
+      changed_when: cleanup_result.stdout != '' or cleanup_result.stderr != ''
+      when: inventory_hostname in groups['monitoring']
 
 # Добавьте перед задачей "Start docker-compose stack (v2)"
     - name: Clean up any existing docker resources
@@ -209,18 +212,20 @@
       become: yes
 
     - name: Obtain SSL certificates (standalone mode)
-      command: >
-        certbot certonly
-        --standalone
-        --preferred-challenges http
-        -d {{ domain_prom }}
-        -d {{ domain_grafana }}
-        --non-interactive
-        --agree-tos
-        -m {{ certbot_email }}
+      command: |
+        certbot certonly --standalone \
+          -d {{ DOMAIN_PROM }} \
+          -d {{ DOMAIN_GRAFANA }} \
+          --email {{ CERTBOT_EMAIL }} \
+          --agree-tos \
+          --no-eff-email \
+          --non-interactive \
+          --keep-until-expiring
       args:
-        creates: /etc/letsencrypt/live/{{ domain_prom }}/fullchain.pem
-      become: yes
+        creates: "/etc/letsencrypt/live/{{ DOMAIN_PROM }}/fullchain.pem"
+      register: certbot_result
+      changed_when: "'Certificate not yet due for expiry' not in certbot_result.stdout"
+      when: inventory_hostname in groups['monitoring']
 
     - name: Start Nginx back
       service:

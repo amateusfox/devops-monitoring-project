@@ -2,30 +2,22 @@ global:
   scrape_interval: 15s
   evaluation_interval: 15s
 
-  rule_files:
-  - "/etc/prometheus/rules/*.yml"
+rule_files:
+  - "/etc/prometheus/rules/node_alerts.yml"
+
 alerting:
-alertmanagers:
-  - static_configs:
-      - targets:
-        - alertmanager:9093
+  alertmanagers:
+    - static_configs:
+        - targets:
+          - alertmanager:9093
 
 scrape_configs:
   - job_name: 'prometheus'
     static_configs:
       - targets: ['localhost:9090']
 
-  - job_name: 'node_local'
+  - job_name: 'node'
     static_configs:
-      - targets: ['172.17.0.1:9100']  # ← для monitoring-vm
-    labels:
-      instance: 'monitoring-vm'
-      role: 'docker-monitoring'
-
-  - job_name: 'node_exporter_control'
-    static_configs:
-      - targets: ['95.163.226.71:9100']  # ← IP control-vm
-    labels:
-      job: 'node_exporter_control'
-      instance: 'control-vm'
-      role: 'ansible-git-jenkins'
+      - targets:
+        - '{{ CONTROL_VM_IP }}:9100'
+        - '{{ MONITORING_VM_IP }}:9100'
